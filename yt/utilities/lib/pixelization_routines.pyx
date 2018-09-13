@@ -119,7 +119,7 @@ def pixelize_cartesian(np.float64_t[:,:] buff,
     # (lr) and then iterate up to "right column" (rc) and "uppeR row" (rr),
     # depositing into them the data value.  Overlap computes the relative
     # overlap of a data value with a pixel.
-    # 
+    #
     # NOTE ON ROWS AND COLUMNS:
     #
     #   The way that images are plotting in matplotlib is somewhat different
@@ -254,7 +254,7 @@ def pixelize_cartesian_nodal(np.float64_t[:,:] buff,
     cdef int lc, lr, rc, rr
     cdef np.float64_t lypx, rypx, lxpx, rxpx, overlap1, overlap2
     # These are the temp vars we get from the arrays
-    cdef np.float64_t oxsp, oysp, ozsp 
+    cdef np.float64_t oxsp, oysp, ozsp
     cdef np.float64_t xsp, ysp, zsp
     cdef np.float64_t dxsp, dysp, dzsp
     # Some periodicity helpers
@@ -303,7 +303,7 @@ def pixelize_cartesian_nodal(np.float64_t[:,:] buff,
     # (lr) and then iterate up to "right column" (rc) and "uppeR row" (rr),
     # depositing into them the data value.  Overlap computes the relative
     # overlap of a data value with a pixel.
-    # 
+    #
     # NOTE ON ROWS AND COLUMNS:
     #
     #   The way that images are plotting in matplotlib is somewhat different
@@ -497,7 +497,7 @@ def pixelize_cylinder(np.float64_t[:,:] buff,
     cdef np.float64_t r_i, theta_i, dr_i, dtheta_i, dthetamin
     cdef np.float64_t costheta, sintheta
     cdef int i, pi, pj
-    
+
     cdef int imax = np.asarray(radius).argmax()
     rmax = radius[imax] + dradius[imax]
 
@@ -558,11 +558,12 @@ def pixelize_cylinder(np.float64_t[:,:] buff,
                 r_i += 0.5*dx
             theta_i += dthetamin
 
-cdef void aitoff_thetaphi_to_xy(np.float64_t theta, np.float64_t phi,
-                                np.float64_t *x, np.float64_t *y):
+cdef int aitoff_thetaphi_to_xy(np.float64_t theta, np.float64_t phi,
+                               np.float64_t *x, np.float64_t *y) except -1:
     cdef np.float64_t z = math.sqrt(1 + math.cos(phi) * math.cos(theta / 2.0))
     x[0] = math.cos(phi) * math.sin(theta / 2.0) / z
     y[0] = math.sin(phi) / z
+    return 0
 
 @cython.cdivision(True)
 @cython.boundscheck(False)
@@ -577,8 +578,8 @@ def pixelize_aitoff(np.float64_t[:] theta,
                     np.float64_t theta_offset = 0.0,
                     np.float64_t phi_offset = 0.0):
     # http://paulbourke.net/geometry/transformationprojection/
-    # longitude is -pi to pi
-    # latitude is -pi/2 to pi/2
+    # (theta) longitude is -pi to pi
+    # (phi) latitude is -pi/2 to pi/2
     # z^2 = 1 + cos(latitude) cos(longitude/2)
     # x = cos(latitude) sin(longitude/2) / z
     # y = sin(latitude) / z
@@ -794,7 +795,7 @@ def pixelize_element_mesh(np.ndarray[np.float64_t, ndim=2] coords,
     vertices = <np.float64_t *> malloc(ndim * sizeof(np.float64_t) * nvertices)
     field_vals = <np.float64_t *> malloc(sizeof(np.float64_t) * num_field_vals)
 
-    # fill the image bounds and pixel size informaton here
+    # fill the image bounds and pixel size information here
     for i in range(ndim):
         pLE[i] = extents[i][0]
         pRE[i] = extents[i][1]
@@ -862,3 +863,107 @@ def pixelize_element_mesh(np.ndarray[np.float64_t, ndim=2] coords,
     free(vertices)
     free(field_vals)
     return img
+
+def pixelize_element_mesh_line(np.ndarray[np.float64_t, ndim=2] coords,
+                               np.ndarray[np.int64_t, ndim=2] conn,
+                               np.ndarray[np.float64_t, ndim=1] start_point,
+                               np.ndarray[np.float64_t, ndim=1] end_point,
+                               npoints,
+                               np.ndarray[np.float64_t, ndim=2] field,
+                               int index_offset = 0):
+
+    # This routine chooses the correct element sampler to interpolate field
+    # values at evenly spaced points along a sampling line
+    cdef np.float64_t *vertices
+    cdef np.float64_t *field_vals
+    cdef int nvertices = conn.shape[1]
+    cdef int ndim = coords.shape[1]
+    cdef int num_field_vals = field.shape[1]
+    cdef int num_plot_nodes = npoints
+    cdef int num_intervals = npoints - 1
+    cdef double[4] mapped_coord
+    cdef ElementSampler sampler
+    cdef np.ndarray[np.float64_t, ndim=1] lin_vec
+    cdef np.ndarray[np.float64_t, ndim=1] lin_inc
+    cdef np.ndarray[np.float64_t, ndim=2] lin_sample_points
+    cdef np.int64_t i, n, j, k
+    cdef np.ndarray[np.float64_t, ndim=1] arc_length
+    cdef np.float64_t lin_length, inc_length
+    cdef np.ndarray[np.float64_t, ndim=1] plot_values
+    cdef np.float64_t sample_point[3]
+
+    lin_vec = np.zeros(ndim, dtype="float64")
+    lin_inc = np.zeros(ndim, dtype="float64")
+
+    lin_sample_points = np.zeros((num_plot_nodes, ndim), dtype="float64")
+    arc_length = np.zeros(num_plot_nodes, dtype="float64")
+    plot_values = np.zeros(num_plot_nodes, dtype="float64")
+
+    # Pick the right sampler and allocate storage for the mapped coordinate
+    if ndim == 3 and nvertices == 4:
+        sampler = P1Sampler3D()
+    elif ndim == 3 and nvertices == 6:
+        sampler = W1Sampler3D()
+    elif ndim == 3 and nvertices == 8:
+        sampler = Q1Sampler3D()
+    elif ndim == 3 and nvertices == 20:
+        sampler = S2Sampler3D()
+    elif ndim == 2 and nvertices == 3:
+        sampler = P1Sampler2D()
+    elif ndim == 1 and nvertices == 2:
+        sampler = P1Sampler1D()
+    elif ndim == 2 and nvertices == 4:
+        sampler = Q1Sampler2D()
+    elif ndim == 2 and nvertices == 9:
+        sampler = Q2Sampler2D()
+    elif ndim == 2 and nvertices == 6:
+        sampler = T2Sampler2D()
+    elif ndim == 3 and nvertices == 10:
+        sampler = Tet2Sampler3D()
+    else:
+        raise YTElementTypeNotRecognized(ndim, nvertices)
+
+    # allocate temporary storage
+    vertices = <np.float64_t *> malloc(ndim * sizeof(np.float64_t) * nvertices)
+    field_vals = <np.float64_t *> malloc(sizeof(np.float64_t) * num_field_vals)
+
+    lin_vec = end_point - start_point
+    lin_length = np.linalg.norm(lin_vec)
+    lin_inc = lin_vec / num_intervals
+    inc_length = lin_length / num_intervals
+    for j in range(ndim):
+        lin_sample_points[0, j] = start_point[j]
+    arc_length[0] = 0
+    for i in range(1, num_intervals + 1):
+        for j in range(ndim):
+            lin_sample_points[i, j] = lin_sample_points[i-1, j] + lin_inc[j]
+            arc_length[i] = arc_length[i-1] + inc_length
+
+    for i in range(num_intervals + 1):
+        for j in range(3):
+            if j < ndim:
+                sample_point[j] = lin_sample_points[i][j]
+            else:
+                sample_point[j] = 0
+        for ci in range(conn.shape[0]):
+            for n in range(num_field_vals):
+                field_vals[n] = field[ci, n]
+
+            # Fill the vertices
+            for n in range(nvertices):
+                cj = conn[ci, n] - index_offset
+                for k in range(ndim):
+                    vertices[ndim*n + k] = coords[cj, k]
+
+            sampler.map_real_to_unit(mapped_coord, vertices, sample_point)
+            if not sampler.check_inside(mapped_coord) and ci != conn.shape[0] - 1:
+                continue
+            elif not sampler.check_inside(mapped_coord):
+                raise ValueError("Check to see that both starting and ending line points "
+                                 "are within the domain of the mesh.")
+            plot_values[i] = sampler.sample_at_unit_point(mapped_coord, field_vals)
+            break
+
+    free(vertices)
+    free(field_vals)
+    return arc_length, plot_values
